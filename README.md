@@ -1,8 +1,6 @@
 # rack-mini-profiler
 
-プロファイラであるrack-mini-profilerのフォークリポジトリです。
-
-
+プロファイラである[rack-mini-profiler](https://github.com/MiniProfiler/rack-mini-profiler)のフォークリポジトリです。
 
 ## オリジナルとの差分
 
