@@ -4,7 +4,7 @@
 
 ## オリジナルとの差分
 
-Rails.application.config.enable_flamegraphをtrueにした場合、「pp=async-flamegraph」がONになるよう修正しました。
+Rails.application.config.enable_flamegraphをtrueにした場合、「pp=async-flamegraph」がONになるよう修正しました。  
 Rails.application.config.enable_flamegraphはconfig/environments/development.rb等に定義してください。
 
 
