@@ -346,7 +346,8 @@ module Rack
         # Prevent response body from being compressed
         env['HTTP_ACCEPT_ENCODING'] = 'identity' if config.suppress_encoding
 
-        if query_string =~ /pp=(async-)?flamegraph/ || env['HTTP_REFERER'] =~ /pp=async-flamegraph/
+        # if query_string =~ /pp=(async-)?flamegraph/ || env['HTTP_REFERER'] =~ /pp=async-flamegraph/
+        if Rails.application.config.enable_flamegraph
           unless defined?(StackProf) && StackProf.respond_to?(:run)
             headers = { 'Content-Type' => 'text/html' }
             message = "Please install the stackprof gem and require it: add gem 'stackprof' to your Gemfile"
