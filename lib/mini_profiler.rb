@@ -392,14 +392,6 @@ module Rack
             ) do
               status, headers, body = @app.call(env)
             end
-          else
-            message = "Please install the stackprof gem and require it: add gem 'stackprof' to your Gemfile"
-            status, headers, body = @app.call(env)
-            body.close if body.respond_to? :close
-
-            return client_settings.handle_cookie(
-              text_result(message, status: status, headers: headers)
-            )
           end
         elsif path == '/rack-mini-profiler/requests'
           blank_page_html = <<~HTML
