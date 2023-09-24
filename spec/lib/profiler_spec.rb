@@ -100,7 +100,7 @@ describe Rack::MiniProfiler do
     end
 
     describe 'typical usage' do
-      before(:all) do
+      before do
         start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         clock_set(start)
         Rack::MiniProfiler.create_current
@@ -122,7 +122,7 @@ describe Rack::MiniProfiler do
         @inner = @outer.children[0]
       end
 
-      after(:all) do
+      after do
         clock_back_to_normal
       end
 
@@ -196,6 +196,37 @@ describe Rack::MiniProfiler do
 
       Rack::MiniProfiler.config.snapshots_transport_destination_url = 'http://example.com'
       expect(Rack::MiniProfiler.snapshots_transporter?).to eq(true)
+    end
+  end
+
+  describe '#call' do
+    let(:app) { lambda { |env| [200, {}, ["OK"]] } }
+    let(:profiler) { Rack::MiniProfiler.new(app) }
+
+    it "returns error response when stackprof isn't installed" do
+      response = profiler.call({ "PATH_INFO" => "/", "QUERY_STRING" => "pp=flamegraph" })
+
+      expect(response).to eq([
+        200,
+        { "Content-Type" => "text/plain; charset=utf-8", "Set-Cookie" => "__profilin=p%3Dt; path=/; HttpOnly; SameSite=Lax" },
+        ["Please install the stackprof gem and require it: add gem 'stackprof' to your Gemfile"],
+      ])
+    end
+
+    it "returns error response when memory_profiler isn't installed" do
+      original_enable_advanced_debugging_tools = Rack::MiniProfiler.config.enable_advanced_debugging_tools
+      Rack::MiniProfiler.config.enable_advanced_debugging_tools = true
+
+      response = profiler.call({ "PATH_INFO" => "/", "QUERY_STRING" => "pp=profile-memory" })
+
+      expect(response).to eq([
+        500,
+        { "Content-Type" => "text/plain; charset=utf-8", "Set-Cookie" => "__profilin=p%3Dt; path=/; HttpOnly; SameSite=Lax" },
+        ["Please install the memory_profiler gem and require it: add gem 'memory_profiler' to your Gemfile"],
+      ])
+
+    ensure
+      Rack::MiniProfiler.config.enable_advanced_debugging_tools = original_enable_advanced_debugging_tools
     end
   end
 end

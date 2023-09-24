@@ -1,6 +1,17 @@
 # frozen_string_literal: true
 
 require 'cgi'
+require 'json'
+require 'erb'
+
+require 'mini_profiler/timer_struct'
+require 'mini_profiler/storage'
+require 'mini_profiler/config'
+require 'mini_profiler/profiling_methods'
+require 'mini_profiler/context'
+require 'mini_profiler/client_settings'
+require 'mini_profiler/gc_profiler'
+require 'mini_profiler/snapshots_transporter'
 
 module Rack
   class MiniProfiler
@@ -27,11 +38,11 @@ module Rack
       end
 
       def resources_root
-        @resources_root ||= ::File.expand_path("../../html", __FILE__)
+        @resources_root ||= ::File.expand_path("../html", __FILE__)
       end
 
       def share_template
-        @share_template ||= ERB.new(::File.read(::File.expand_path("../html/share.html", ::File.dirname(__FILE__))))
+        @share_template ||= ERB.new(::File.read(::File.expand_path("html/share.html", ::File.dirname(__FILE__))))
       end
 
       def current
@@ -223,7 +234,7 @@ module Rack
       # Someone (e.g. Rails engine) could change the SCRIPT_NAME so we save it
       env['RACK_MINI_PROFILER_ORIGINAL_SCRIPT_NAME'] = ENV['PASSENGER_BASE_URI'] || env['SCRIPT_NAME']
 
-      skip_it = /pp=skip/.match?(query_string) || (
+      skip_it = /#{@config.profile_parameter}=skip/.match?(query_string) || (
         @config.skip_paths &&
         @config.skip_paths.any? do |p|
           if p.instance_of?(String)
@@ -255,11 +266,11 @@ module Rack
 
       has_disable_cookie = client_settings.disable_profiling?
       # manual session disable / enable
-      if query_string =~ /pp=disable/ || has_disable_cookie
+      if query_string =~ /#{@config.profile_parameter}=disable/ || has_disable_cookie
         skip_it = true
       end
 
-      if query_string =~ /pp=enable/
+      if query_string =~ /#{@config.profile_parameter}=enable/
         skip_it = false
         config.enabled = true
       end
@@ -273,22 +284,24 @@ module Rack
       end
 
       # profile gc
-      if query_string =~ /pp=profile-gc/
+      if query_string =~ /#{@config.profile_parameter}=profile-gc/
         return tool_disabled_message(client_settings) if !advanced_debugging_enabled?
         current.measure = false if current
         return client_settings.handle_cookie(Rack::MiniProfiler::GCProfiler.new.profile_gc(@app, env))
       end
 
       # profile memory
-      if query_string =~ /pp=profile-memory/
+      if query_string =~ /#{@config.profile_parameter}=profile-memory/
         return tool_disabled_message(client_settings) if !advanced_debugging_enabled?
 
         unless defined?(MemoryProfiler) && MemoryProfiler.respond_to?(:report)
           message = "Please install the memory_profiler gem and require it: add gem 'memory_profiler' to your Gemfile"
-          _, _, body = @app.call(env)
+          status, headers, body = @app.call(env)
           body.close if body.respond_to? :close
 
-          return client_settings.handle_cookie(text_result(message))
+          return client_settings.handle_cookie(
+            text_result(message, status: 500, headers: headers)
+          )
         end
 
         query_params = Rack::Utils.parse_nested_query(query_string)
@@ -308,12 +321,12 @@ module Rack
 
       MiniProfiler.create_current(env, @config)
 
-      if query_string =~ /pp=normal-backtrace/
+      if query_string =~ /#{@config.profile_parameter}=normal-backtrace/
         client_settings.backtrace_level = ClientSettings::BACKTRACE_DEFAULT
-      elsif query_string =~ /pp=no-backtrace/
+      elsif query_string =~ /#{@config.profile_parameter}=no-backtrace/
         current.skip_backtrace = true
         client_settings.backtrace_level = ClientSettings::BACKTRACE_NONE
-      elsif query_string =~ /pp=full-backtrace/ || client_settings.backtrace_full?
+      elsif query_string =~ /#{@config.profile_parameter}=full-backtrace/ || client_settings.backtrace_full?
         current.full_backtrace = true
         client_settings.backtrace_level = ClientSettings::BACKTRACE_FULL
       elsif client_settings.backtrace_none?
@@ -322,7 +335,7 @@ module Rack
 
       flamegraph = nil
 
-      trace_exceptions = query_string =~ /pp=trace-exceptions/ && defined? TracePoint
+      trace_exceptions = query_string =~ /#{@config.profile_parameter}=trace-exceptions/ && defined? TracePoint
       status, headers, body, exceptions, trace = nil
 
       if trace_exceptions
@@ -379,12 +392,24 @@ module Rack
             ) do
               status, headers, body = @app.call(env)
             end
+          else
+            message = "Please install the stackprof gem and require it: add gem 'stackprof' to your Gemfile"
+            status, headers, body = @app.call(env)
+            body.close if body.respond_to? :close
+
+            return client_settings.handle_cookie(
+              text_result(message, status: status, headers: headers)
+            )
           end
         elsif path == '/rack-mini-profiler/requests'
           blank_page_html = <<~HTML
+            <!DOCTYPE html>
             <html>
-              <head></head>
-              <body></body>
+              <head>
+                <title>Rack::MiniProfiler Requests</title>
+              </head>
+              <body>
+              </body>
             </html>
           HTML
 
@@ -419,19 +444,19 @@ module Rack
         return client_settings.handle_cookie(dump_exceptions exceptions)
       end
 
-      if query_string =~ /pp=env/
+      if query_string =~ /#{@config.profile_parameter}=env/
         return tool_disabled_message(client_settings) if !advanced_debugging_enabled?
         body.close if body.respond_to? :close
         return client_settings.handle_cookie(dump_env env)
       end
 
-      if query_string =~ /pp=analyze-memory/
+      if query_string =~ /#{@config.profile_parameter}=analyze-memory/
         return tool_disabled_message(client_settings) if !advanced_debugging_enabled?
         body.close if body.respond_to? :close
         return client_settings.handle_cookie(analyze_memory)
       end
 
-      if query_string =~ /pp=help/
+      if query_string =~ /#{@config.profile_parameter}=help/
         body.close if body.respond_to? :close
         return client_settings.handle_cookie(help(client_settings, env))
       end
@@ -440,9 +465,9 @@ module Rack
       page_struct[:user] = user(env)
       page_struct[:root].record_time((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000)
 
-      if flamegraph && query_string =~ /pp=flamegraph/
+      if flamegraph && query_string =~ /#{@config.profile_parameter}=flamegraph/
         body.close if body.respond_to? :close
-        return client_settings.handle_cookie(self.flamegraph(flamegraph, path))
+        return client_settings.handle_cookie(self.flamegraph(flamegraph, path, env))
       elsif flamegraph # async-flamegraph
         page_struct[:has_flamegraph] = true
         page_struct[:flamegraph] = flamegraph
@@ -638,53 +663,61 @@ module Rack
       text_result(body)
     end
 
-    def text_result(body)
-      headers = { 'Content-Type' => 'text/plain; charset=utf-8' }
-      [200, headers, [body]]
+    def text_result(body, status: 200, headers: nil)
+      headers = (headers || {}).merge('Content-Type' => 'text/plain; charset=utf-8')
+      [status, headers, [body]]
     end
 
     def make_link(postfix, env)
-      link = env["PATH_INFO"] + "?" + env["QUERY_STRING"].sub("pp=help", "pp=#{postfix}")
-      "pp=<a href='#{ERB::Util.html_escape(link)}'>#{postfix}</a>"
+      link = env["PATH_INFO"] + "?" + env["QUERY_STRING"].sub("#{@config.profile_parameter}=help", "#{@config.profile_parameter}=#{postfix}")
+      "#{@config.profile_parameter}=<a href='#{ERB::Util.html_escape(link)}'>#{postfix}</a>"
     end
 
     def help(client_settings, env)
-      headers = { 'Content-Type' => 'text/html' }
-      body = "<html><body>
-<pre style='line-height: 30px; font-size: 16px;'>
-This is the help menu of the <a href='#{Rack::MiniProfiler::SOURCE_CODE_URI}'>rack-mini-profiler</a> gem, append the following to your query string for more options:
-
-  #{make_link "help", env} : display this screen
-  #{make_link "env", env} : display the rack environment
-  #{make_link "skip", env} : skip mini profiler for this request
-  #{make_link "no-backtrace", env} #{"(*) " if client_settings.backtrace_none?}: don't collect stack traces from all the SQL executed (sticky, use pp=normal-backtrace to enable)
-  #{make_link "normal-backtrace", env} #{"(*) " if client_settings.backtrace_default?}: collect stack traces from all the SQL executed and filter normally
-  #{make_link "full-backtrace", env} #{"(*) " if client_settings.backtrace_full?}: enable full backtraces for SQL executed (use pp=normal-backtrace to disable)
-  #{make_link "disable", env} : disable profiling for this session
-  #{make_link "enable", env} : enable profiling for this session (if previously disabled)
-  #{make_link "profile-gc", env} : perform gc profiling on this request, analyzes ObjectSpace generated by request
-  #{make_link "profile-memory", env} : requires the memory_profiler gem, new location based report
-  #{make_link "flamegraph", env} : a graph representing sampled activity (requires the stackprof gem).
-  #{make_link "async-flamegraph", env} : store flamegraph data for this page and all its AJAX requests. Flamegraph links will be available in the mini-profiler UI (requires the stackprof gem).
-  #{make_link "flamegraph&flamegraph_sample_rate=1", env}: creates a flamegraph with the specified sample rate (in ms). Overrides value set in config
-  #{make_link "flamegraph&flamegraph_mode=cpu", env}: creates a flamegraph with the specified mode (one of cpu, wall, object, or custom). Overrides value set in config
-  #{make_link "flamegraph_embed", env} : a graph representing sampled activity (requires the stackprof gem), embedded resources for use on an intranet.
-  #{make_link "trace-exceptions", env} : will return all the spots where your application raises exceptions
-  #{make_link "analyze-memory", env} : will perform basic memory analysis of heap
-</pre>
-</body>
-</html>
-"
-
-      [200, headers, [body]]
-    end
-
-    def flamegraph(graph, path)
       headers = { 'Content-Type' => 'text/html' }
       html = <<~HTML
         <!DOCTYPE html>
         <html>
           <head>
+            <title>Rack::MiniProfiler Help</title>
+          </head>
+          <body>
+            <pre style='line-height: 30px; font-size: 16px'>
+              This is the help menu of the <a href='#{Rack::MiniProfiler::SOURCE_CODE_URI}'>rack-mini-profiler</a> gem, append the following to your query string for more options:
+
+              #{make_link "help", env} : display this screen
+              #{make_link "env", env} : display the rack environment
+              #{make_link "skip", env} : skip mini profiler for this request
+              #{make_link "no-backtrace", env} #{"(*) " if client_settings.backtrace_none?}: don't collect stack traces from all the SQL executed (sticky, use #{@config.profile_parameter}=normal-backtrace to enable)
+              #{make_link "normal-backtrace", env} #{"(*) " if client_settings.backtrace_default?}: collect stack traces from all the SQL executed and filter normally
+              #{make_link "full-backtrace", env} #{"(*) " if client_settings.backtrace_full?}: enable full backtraces for SQL executed (use #{@config.profile_parameter}=normal-backtrace to disable)
+              #{make_link "disable", env} : disable profiling for this session
+              #{make_link "enable", env} : enable profiling for this session (if previously disabled)
+              #{make_link "profile-gc", env} : perform gc profiling on this request, analyzes ObjectSpace generated by request
+              #{make_link "profile-memory", env} : requires the memory_profiler gem, new location based report
+              #{make_link "flamegraph", env} : a graph representing sampled activity (requires the stackprof gem).
+              #{make_link "async-flamegraph", env} : store flamegraph data for this page and all its AJAX requests. Flamegraph links will be available in the mini-profiler UI (requires the stackprof gem).
+              #{make_link "flamegraph&flamegraph_sample_rate=1", env}: creates a flamegraph with the specified sample rate (in ms). Overrides value set in config
+              #{make_link "flamegraph&flamegraph_mode=cpu", env}: creates a flamegraph with the specified mode (one of cpu, wall, object, or custom). Overrides value set in config
+              #{make_link "flamegraph_embed", env} : a graph representing sampled activity (requires the stackprof gem), embedded resources for use on an intranet.
+              #{make_link "trace-exceptions", env} : will return all the spots where your application raises exceptions
+              #{make_link "analyze-memory", env} : will perform basic memory analysis of heap
+            </pre>
+          </body>
+        </html>
+      HTML
+
+      [200, headers, [html]]
+    end
+
+    def flamegraph(graph, path, env)
+      headers = { 'Content-Type' => 'text/html' }
+      iframe_src = "#{public_base_path(env)}speedscope/index.html"
+      html = <<~HTML
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Rack::MiniProfiler Flamegraph</title>
             <style>
               body { margin: 0; height: 100vh; }
               #speedscope-iframe { width: 100%; height: 100%; border: none; }
@@ -699,7 +732,7 @@ This is the help menu of the <a href='#{Rack::MiniProfiler::SOURCE_CODE_URI}'>ra
               var iframe = document.createElement('IFRAME');
               iframe.setAttribute('id', 'speedscope-iframe');
               document.body.appendChild(iframe);
-              var iframeUrl = '#{@config.base_url_path}speedscope/index.html#profileURL=' + objUrl + '&title=' + 'Flamegraph for #{CGI.escape(path)}';
+              var iframeUrl = '#{iframe_src}#profileURL=' + objUrl + '&title=' + 'Flamegraph for #{CGI.escape(path)}';
               iframe.setAttribute('src', iframeUrl);
             </script>
           </body>
@@ -728,7 +761,7 @@ This is the help menu of the <a href='#{Rack::MiniProfiler::SOURCE_CODE_URI}'>ra
     # * you have disabled auto append behaviour throught :auto_inject => false flag
     # * you do not want script to be automatically appended for the current page. You can also call cancel_auto_inject
     def get_profile_script(env)
-      path = "#{env['RACK_MINI_PROFILER_ORIGINAL_SCRIPT_NAME']}#{@config.base_url_path}"
+      path = public_base_path(env)
       version = MiniProfiler::ASSET_VERSION
       if @config.assets_url
         url = @config.assets_url.call('rack-mini-profiler.js', version, env)
@@ -773,7 +806,7 @@ This is the help menu of the <a href='#{Rack::MiniProfiler::SOURCE_CODE_URI}'>ra
       end
 
       # TODO : cache this snippet
-      script = ::File.read(::File.expand_path('../html/profile_handler.js', ::File.dirname(__FILE__)))
+      script = ::File.read(::File.expand_path('html/profile_handler.js', ::File.dirname(__FILE__)))
       # replace the variables
       settings.each do |k, v|
         regex = Regexp.new("\\{#{k.to_s}\\}")
@@ -828,8 +861,11 @@ This is the help menu of the <a href='#{Rack::MiniProfiler::SOURCE_CODE_URI}'>ra
       response = Rack::Response.new([], status, headers)
 
       response.write <<~HTML
+        <!DOCTYPE html>
         <html>
-          <head></head>
+          <head>
+            <title>Rack::MiniProfiler Snapshots</title>
+          </head>
           <body class="mp-snapshots">
       HTML
       response.write(data_html)
@@ -857,7 +893,7 @@ This is the help menu of the <a href='#{Rack::MiniProfiler::SOURCE_CODE_URI}'>ra
         return [404, {}, ["No flamegraph available for #{ERB::Util.html_escape(id)}"]]
       end
 
-      self.flamegraph(page_struct[:flamegraph], page_struct[:request_path])
+      self.flamegraph(page_struct[:flamegraph], page_struct[:request_path], env)
     end
 
     def rails_route_from_path(path, method)
@@ -914,6 +950,10 @@ This is the help menu of the <a href='#{Rack::MiniProfiler::SOURCE_CODE_URI}'>ra
       end
       self.current = nil
       results
+    end
+
+    def public_base_path(env)
+      "#{env['RACK_MINI_PROFILER_ORIGINAL_SCRIPT_NAME']}#{@config.base_url_path}"
     end
   end
 end
