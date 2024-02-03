@@ -2,6 +2,10 @@
 
 プロファイラである[rack-mini-profiler](https://github.com/MiniProfiler/rack-mini-profiler)のフォークリポジトリです。
 
+ボタンやリンクのクリックによって発生する全てのリクエストに対してプロファイリングを行います。  
+（オリジナルのプロファイラは、ボタンやリンクのクリックによって発生するリクエストのみに対してプロファイリングを行います。）  
+そのため、ボタンを押下した後にクライアントサイドで動的に実行されるリクエストに対してもプロファイリングを行うことができます。
+
 ## オリジナルとの差分
 
 Rails.application.config.enable_flamegraphをtrueにした場合、「pp=async-flamegraph」がONになるよう修正しました。  
