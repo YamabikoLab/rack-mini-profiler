@@ -27,7 +27,7 @@ describe Rack::MiniProfiler do
       get '/rack-mini-profiler/requests', {}, 'HTTP_ACCEPT_ENCODING' => 'gzip, compress'
 
       expect(last_response.body).to include('<title>Rack::MiniProfiler Requests</title>')
-      expect(last_response.body).to match('.*<body>\n  <script .*></script>\n</body>/*')
+      expect(last_response.body).to match('<body>\n  </body>')
     end
   end
 
@@ -56,6 +56,7 @@ describe Rack::MiniProfiler do
       expect(last_response.body).to include("async-flamegraph")
       expect(last_response.body).to include("flamegraph&flamegraph_sample_rate=1")
       expect(last_response.body).to include("flamegraph&flamegraph_mode=cpu")
+      expect(last_response.body).to include("flamegraph&flamegraph_ignore_gc=true")
       expect(last_response.body).to include("flamegraph_embed")
       expect(last_response.body).to include("trace-exceptions")
       expect(last_response.body).to include("analyze-memory")
